@@ -1,0 +1,204 @@
+// ============================================================================
+// Prisma Schema — Video Calling Backend
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum MeetingStatus {
+  created
+  waiting
+  active
+  ending
+  ended
+}
+
+enum ParticipantRole {
+  host
+  co_host
+  participant
+}
+
+enum DevicePlatform {
+  ios
+  android
+  web
+}
+
+enum UserStatus {
+  active
+  disabled
+  deleted
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String     @id @default(uuid()) @db.Uuid
+  name      String     @db.VarChar(255)
+  email     String     @unique @db.VarChar(320)
+  password  String     @db.VarChar(255)
+  avatarUrl String?    @map("avatar_url") @db.VarChar(2048)
+  status    UserStatus @default(active)
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  sessions     Session[]
+  devices      Device[]
+  hostedMeetings    Meeting[]            @relation("HostedMeetings")
+  participations    MeetingParticipant[]
+  chatMessages      ChatMessage[]
+  auditLogs         AuditLog[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Sessions (refresh token tracking)
+// ---------------------------------------------------------------------------
+
+model Session {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  refreshTokenHash String   @map("refresh_token_hash") @db.VarChar(255)
+  deviceId         String?  @map("device_id") @db.Uuid
+  userAgent        String?  @map("user_agent") @db.VarChar(512)
+  ipAddress        String?  @map("ip_address") @db.VarChar(45)
+  expiresAt        DateTime @map("expires_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([refreshTokenHash])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Devices (push token registration)
+// ---------------------------------------------------------------------------
+
+model Device {
+  id          String         @id @default(uuid()) @db.Uuid
+  userId      String         @map("user_id") @db.Uuid
+  platform    DevicePlatform
+  deviceName  String?        @map("device_name") @db.VarChar(255)
+  pushToken   String?        @map("push_token") @db.VarChar(512)
+  voipToken   String?        @map("voip_token") @db.VarChar(512)
+  appVersion  String?        @map("app_version") @db.VarChar(50)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions Session[]
+
+  @@unique([userId, platform, pushToken])
+  @@index([userId])
+  @@map("devices")
+}
+
+// ---------------------------------------------------------------------------
+// Meetings
+// ---------------------------------------------------------------------------
+
+model Meeting {
+  id         String        @id @default(uuid()) @db.Uuid
+  code       String        @unique @db.VarChar(20)
+  hostUserId String        @map("host_user_id") @db.Uuid
+  title      String?       @db.VarChar(500)
+  status     MeetingStatus @default(created)
+  startedAt  DateTime?     @map("started_at")
+  endedAt    DateTime?     @map("ended_at")
+  createdAt  DateTime      @default(now()) @map("created_at")
+  updatedAt  DateTime      @updatedAt @map("updated_at")
+
+  host         User                 @relation("HostedMeetings", fields: [hostUserId], references: [id])
+  participants MeetingParticipant[]
+  chatMessages ChatMessage[]
+  auditLogs    AuditLog[]
+
+  @@index([code])
+  @@index([hostUserId])
+  @@index([status])
+  @@map("meetings")
+}
+
+// ---------------------------------------------------------------------------
+// Meeting Participants
+// ---------------------------------------------------------------------------
+
+model MeetingParticipant {
+  id            String          @id @default(uuid()) @db.Uuid
+  meetingId     String          @map("meeting_id") @db.Uuid
+  userId        String          @map("user_id") @db.Uuid
+  role          ParticipantRole @default(participant)
+  joinedAt      DateTime        @default(now()) @map("joined_at")
+  leftAt        DateTime?       @map("left_at")
+  micEnabled    Boolean         @default(false) @map("mic_enabled")
+  cameraEnabled Boolean         @default(false) @map("camera_enabled")
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, userId, leftAt])
+  @@index([meetingId])
+  @@index([userId])
+  @@index([meetingId, userId])
+  @@map("meeting_participants")
+}
+
+// ---------------------------------------------------------------------------
+// Chat Messages
+// ---------------------------------------------------------------------------
+
+model ChatMessage {
+  id           String   @id @default(uuid()) @db.Uuid
+  meetingId    String   @map("meeting_id") @db.Uuid
+  senderUserId String   @map("sender_user_id") @db.Uuid
+  body         String   @db.VarChar(2000)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  sender  User    @relation(fields: [senderUserId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+  @@index([senderUserId])
+  @@map("chat_messages")
+}
+
+// ---------------------------------------------------------------------------
+// Audit Logs
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  meetingId   String?  @map("meeting_id") @db.Uuid
+  eventType   String   @map("event_type") @db.VarChar(100)
+  payload     Json?    @default("{}")
+  ipAddress   String?  @map("ip_address") @db.VarChar(45)
+  userAgent   String?  @map("user_agent") @db.VarChar(512)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  actor   User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  meeting Meeting? @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId])
+  @@index([meetingId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

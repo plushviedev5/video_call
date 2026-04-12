@@ -1,0 +1,75 @@
+# ============================================
+# Render Blueprint — One-click deployment
+# https://render.com/docs/blueprint-spec
+# ============================================
+
+services:
+  - type: web
+    name: videocall-backend
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy && npm run build
+    startCommand: node dist/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+
+      # Neon PostgreSQL — paste your connection string
+      - key: DATABASE_URL
+        sync: false
+
+      # Upstash Redis — paste from your Upstash dashboard
+      - key: REDIS_HOST
+        sync: false
+      - key: REDIS_PORT
+        value: "6379"
+      - key: REDIS_PASSWORD
+        sync: false
+      - key: REDIS_DB
+        value: "0"
+      - key: REDIS_TLS
+        value: "true"
+
+      # JWT Secrets — Render auto-generates these
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_ACCESS_EXPIRY
+        value: 15m
+      - key: JWT_REFRESH_EXPIRY
+        value: 7d
+
+      # CORS — set to your Flutter app domain or * for testing
+      - key: CORS_ORIGIN
+        value: "*"
+
+      # Rate Limiting
+      - key: RATE_LIMIT_MAX
+        value: "100"
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "60000"
+
+      # BullMQ — same Upstash Redis
+      - key: BULL_REDIS_HOST
+        sync: false
+      - key: BULL_REDIS_PORT
+        value: "6379"
+      - key: BULL_REDIS_PASSWORD
+        sync: false
+      - key: BULL_REDIS_TLS
+        value: "true"
+
+      # Metrics
+      - key: METRICS_ENABLED
+        value: "true"
+      - key: METRICS_PORT
+        value: "9090"
