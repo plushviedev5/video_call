@@ -8,10 +8,11 @@ import {
   responseHeadersMiddleware,
 } from './middleware/request-context.middleware.js';
 import { httpRequestDuration, httpRequestTotal, metricsRegistry } from './logging/metrics.js';
-import { checkDatabaseHealth } from './infrastructure/db/prisma.js';
-import { checkRedisHealth } from './infrastructure/redis/client.js';
-import { checkQueueHealth } from './infrastructure/queue/queue.js';
 import { logger } from './logging/logger.js';
+
+// Readiness flags are set by server.ts after each dependency connects.
+// Imported here so /health can read them without live-pinging the DB/Redis.
+import { readiness } from './server.js';
 
 // Module controllers
 import { authController } from './modules/auth/auth.controller.js';
@@ -54,7 +55,6 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Global hooks
   // -----------------------------------------------------------------------
 
-  // Request context
   app.addHook('onRequest', requestContextMiddleware);
   app.addHook('onSend', responseHeadersMiddleware);
 
@@ -81,10 +81,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       });
 
       request.log.info(
-        {
-          statusCode: reply.statusCode,
-          durationMs: Math.round(durationSec * 1000),
-        },
+        { statusCode: reply.statusCode, durationMs: Math.round(durationSec * 1000) },
         'Request completed',
       );
     }
@@ -100,27 +97,32 @@ export async function buildApp(): Promise<FastifyInstance> {
   // -----------------------------------------------------------------------
   // Health check
   // -----------------------------------------------------------------------
+  //
+  // IMPORTANT: reads in-memory readiness flags set by server.ts.
+  // Does NOT live-ping DB/Redis — that would return 503 during the startup
+  // window and cause Render to restart a process that is otherwise healthy.
+  //
+  // Two endpoints:
+  //   GET /health  → liveness  (is the process alive?)   — always 200
+  //   GET /ready   → readiness (are dependencies up?)    — 200 | 503
 
   app.get('/health', async (_request, reply) => {
-    const [dbHealthy, redisHealthy, queueHealthy] = await Promise.all([
-      checkDatabaseHealth(),
-      checkRedisHealth(),
-      checkQueueHealth(),
-    ]);
+    reply.status(200).send({
+      status: 'alive',
+      timestamp: new Date().toISOString(),
+    });
+  });
 
-    const healthy = dbHealthy && redisHealthy && queueHealthy;
-
-    const status = {
-      status: healthy ? 'healthy' : 'degraded',
+  app.get('/ready', async (_request, reply) => {
+    const healthy = readiness.db && readiness.redis;
+    reply.status(healthy ? 200 : 503).send({
+      status: healthy ? 'ready' : 'degraded',
       timestamp: new Date().toISOString(),
       services: {
-        database: dbHealthy ? 'up' : 'down',
-        redis: redisHealthy ? 'up' : 'down',
-        queue: queueHealthy ? 'up' : 'down',
+        database: readiness.db ? 'up' : 'down',
+        redis: readiness.redis ? 'up' : 'down',
       },
-    };
-
-    reply.status(healthy ? 200 : 503).send(status);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -146,7 +148,6 @@ export async function buildApp(): Promise<FastifyInstance> {
       await v1.register(usersController, { prefix: '/users' });
       await v1.register(meetingsController, { prefix: '/meetings' });
       await v1.register(participantsController, { prefix: '/participants' });
-      // Chat routes are nested under meetings: /v1/meetings/:id/chat
       await v1.register(chatController, { prefix: '/meetings' });
       await v1.register(devicesController, { prefix: '/devices' });
     },
@@ -158,12 +159,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   // -----------------------------------------------------------------------
 
   app.addHook('onReady', async () => {
-    logger.info(
-      {
-        routes: app.printRoutes({ commonPrefix: false }),
-      },
-      'All routes registered',
-    );
+    logger.info({ routes: app.printRoutes({ commonPrefix: false }) }, 'All routes registered');
   });
 
   return app;

@@ -2,7 +2,7 @@ import { createServer } from 'http';
 import { buildApp } from './app.js';
 import { config } from './config/index.js';
 import { logger } from './logging/logger.js';
-import { getPrismaClient, disconnectDatabase } from './infrastructure/db/prisma.js';
+import { connectDatabase, disconnectDatabase } from './infrastructure/db/prisma.js';
 import { connectRedis, disconnectRedis } from './infrastructure/redis/client.js';
 import { closeQueues } from './infrastructure/queue/queue.js';
 import { startNotificationWorker, stopNotificationWorker } from './infrastructure/queue/workers/notification.worker.js';
@@ -10,7 +10,7 @@ import { startAuditWorker, stopAuditWorker } from './infrastructure/queue/worker
 import { initializeSignalingGateway } from './modules/signaling/signaling.gateway.js';
 
 // ---------------------------------------------------------------------------
-// Readiness state — checked by /health
+// Readiness state — read by app.ts /health and /ready routes
 // ---------------------------------------------------------------------------
 
 export const readiness = {
@@ -33,7 +33,8 @@ async function bootstrap(): Promise<void> {
   const io = initializeSignalingGateway(httpServer);
   (app as any).io = io;
 
-  // 3. Listen FIRST — Render needs to see an open port immediately
+  // 3. Bind the port FIRST — Render must see an open port or it sends SIGTERM.
+  //    Infrastructure connects in the background after this point.
   await app.ready();
 
   await new Promise<void>((resolve, reject) => {
@@ -46,9 +47,9 @@ async function bootstrap(): Promise<void> {
     '🚀 Server is running',
   );
 
-  // 4. Connect infrastructure in the background — do NOT block the port
+  // 4. Connect infrastructure in the background
   connectInfrastructure().catch((err) => {
-    logger.error({ err }, 'Infrastructure connection error after startup');
+    logger.error({ err }, 'Unexpected error in connectInfrastructure');
   });
 
   // -----------------------------------------------------------------------
@@ -91,40 +92,23 @@ async function bootstrap(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function connectInfrastructure(): Promise<void> {
-  // --- PostgreSQL ---
-  logger.info('Connecting to database...');
-  const prisma = getPrismaClient();
+  // --- PostgreSQL (5 attempts, 3 s apart) ---
   try {
-    await Promise.race([
-      prisma.$connect(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Database connection timeout (15s)')), 15_000),
-      ),
-    ]);
+    await connectDatabase(5, 3_000);
     readiness.db = true;
-    logger.info('Database connected');
-  } catch (error) {
-    logger.error({ error }, 'Could not connect to database — service is degraded');
-    // Let Render's health-check (which reads `readiness.db`) surface the failure
-    // instead of crashing the whole process and losing the open port.
+  } catch (err) {
+    logger.error({ err }, 'Database unavailable — service running in degraded mode');
   }
 
-  // --- Redis ---
-  logger.info('Connecting to Redis...');
+  // --- Redis (5 attempts, 2 s apart) ---
   try {
-    await Promise.race([
-      connectRedis(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Redis connection timeout (10s)')), 10_000),
-      ),
-    ]);
+    await connectWithRetry('Redis', connectRedis, 5, 2_000);
     readiness.redis = true;
-    logger.info('Redis connected');
-  } catch (error) {
-    logger.error({ error }, 'Could not connect to Redis — service is degraded');
+  } catch (err) {
+    logger.error({ err }, 'Redis unavailable — service running in degraded mode');
   }
 
-  // --- BullMQ workers (need Redis to be up first) ---
+  // --- BullMQ workers (require Redis) ---
   if (readiness.redis) {
     logger.info('Starting queue workers...');
     startNotificationWorker();
@@ -133,6 +117,24 @@ async function connectInfrastructure(): Promise<void> {
   } else {
     logger.warn('Skipping queue workers — Redis unavailable');
   }
+}
+
+async function connectWithRetry(
+  name: string,
+  fn: () => Promise<void>,
+  retries = 5,
+  delayMs = 2_000,
+): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await fn();
+      return;
+    } catch (err) {
+      logger.warn({ err, attempt, retries }, `${name} connection attempt ${attempt}/${retries} failed`);
+      if (attempt < retries) await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error(`${name} failed to connect after ${retries} attempts`);
 }
 
 // ---------------------------------------------------------------------------
