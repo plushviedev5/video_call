@@ -19,12 +19,34 @@ async function bootstrap(): Promise<void> {
   // 1. Connect to infrastructure
   logger.info('Connecting to database...');
   const prisma = getPrismaClient();
-  await prisma.$connect();
-  logger.info('Database connected');
+  
+  // Set a timeout for the initial connection to avoid hanging in Render/Docker
+  try {
+    await Promise.race([
+      prisma.$connect(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Database connection timeout (15s)')), 15000))
+    ]);
+    logger.info('Database connected');
+  } catch (error) {
+    logger.error({ error }, 'Could not connect to database on startup');
+    // In production, we want to exit early so Render sees the failure and restarts
+    if (config.isProduction) {
+      process.exit(1);
+    }
+  }
 
   logger.info('Connecting to Redis...');
-  await connectRedis();
-  logger.info('Redis connected');
+  try {
+    await Promise.race([
+      connectRedis(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Redis connection timeout (10s)')), 10000))
+    ]);
+    logger.info('Redis connected');
+  } catch (error) {
+    logger.error({ error }, 'Could not connect to Redis on startup');
+    // Depending on logic, we might still want to start without Redis, 
+    // but usually, it's critical for signaling/sockets.
+  }
 
   // 2. Start queue workers
   logger.info('Starting queue workers...');
